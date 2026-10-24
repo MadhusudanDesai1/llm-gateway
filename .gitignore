@@ -1,0 +1,9 @@
+# secrets and environments
+.env
+.venv/
+# runtime data
+data/
+__pycache__/
+*.pyc
+# logs (can contain account identifiers)
+results/*.log

@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+litellm
+python-dotenv
+pyyaml
+pydantic
+streamlit
+pandas
+datasets
+matplotlib
+boto3

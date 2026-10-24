@@ -1,0 +1,41 @@
+# Per-model request throttle (requests/min). Free tier = 30 RPM -> use 25.
+# After upgrading to the Developer plan, set this to 600.
+rpm: 15
+
+models:
+  cheap:
+    id: openai/gpt-oss-20b
+    input_per_m: 0.075
+    output_per_m: 0.30
+    max_tokens: 2048
+    extra: {reasoning_effort: low}
+  strong:
+    id: openai/gpt-oss-120b
+    input_per_m: 0.15
+    output_per_m: 0.60
+    max_tokens: 4096
+    extra: {reasoning_effort: medium}
+  # --- candidate judges ---
+  judge:                      # Qwen (original)
+    id: qwen/qwen3.8-27b
+    input_per_m: 0.80
+    output_per_m: 4.00
+    max_tokens: 512
+    extra: {reasoning_effort: none}
+  judge_120b:
+    id: openai/gpt-oss-120b
+    input_per_m: 0.15
+    output_per_m: 0.60
+    max_tokens: 1024
+    extra: {reasoning_effort: low}
+
+verifier:
+  mode: self
+  threshold: 0.9
+  hybrid_gate: 0.9
+  judge_role: judge_120b   # judge used by the live gateway; pick after the benchmark
+  strong_cost_ratio: 3.4   # strong/cheap cost per query, measured on 200 MMLU questions
+  strong_cost_ratio: 3.4   # strong/cheap cost per query, measured on 200 MMLU questions
+
+benchmark:
+  judge_roles: [judge, judge_120b]
