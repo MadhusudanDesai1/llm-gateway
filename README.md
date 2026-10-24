@@ -60,6 +60,57 @@ _FastAPI's built-in docs page: one request answered by the cheap model in 309 ms
 ![routing demo](docs/routing-demo.png)
 _Same prompt, two routes: the default threshold stays on gpt-oss-20b, a threshold of 1.5 forces escalation to gpt-oss-120b._
 
+## Deployment (AWS Lambda)
+
+The gateway runs as a container image on AWS Lambda behind a Function URL, with request logs in DynamoDB.
+
+```mermaid
+flowchart LR
+  C[Client] -->|HTTPS + x-api-key| U[Lambda Function URL]
+  U --> L[Lambda: FastAPI via Web Adapter]
+  L --> G[Groq API]
+  L --> D[(DynamoDB request log)]
+```
+
+| Piece | Detail |
+|---|---|
+| Compute | Lambda container image (x86_64, 2048 MB, 60 s timeout), built from the repo's `Dockerfile`. AWS Lambda Web Adapter runs the unmodified FastAPI app |
+| Auth | `x-api-key` header checked against `GATEWAY_API_KEY` with a constant-time comparison; `/health` is open |
+| Logging | DynamoDB on-demand table keyed by `request_id` (`LOG_BACKEND=dynamodb`) |
+| IAM | Basic log-writing role plus `PutItem` and `Scan` on that one table only |
+| Region | `ap-southeast-2` (Sydney), the region AWS assigned to this account |
+
+### Measured on Lambda
+
+Small samples (two cold starts, five warm calls), so treat these as indicative.
+
+| Measurement | Result |
+|---|---|
+| First invocation after deploy | Init hit Lambda's 10 s limit and was retried inside the request: 15.7 s invocation, **28.4 s** end to end |
+| Later cold start (after idle) | Init 4.9 s, **6.5 s** billed for the request |
+| Warm `/chat` (inside the function) | 62 to 350 ms |
+| Warm `/chat` (from a laptop in India) | 1.0 to 1.26 s, including a new connection per request |
+| Memory used | 294 to 345 MB of 2048 MB |
+| Logging check | 7 requests produced 7 DynamoDB rows |
+| Auth check | 401 without a key or with a wrong key, 200 with the right key |
+
+Cold starts are the main cost of this setup. The heavy `litellm` import is the likely cause, but I did not isolate it. Options I did not try: lazy imports or a thinner client, a smaller image, provisioned concurrency.
+
+### Deploy notes
+
+```bash
+# Lambda rejects Docker's default provenance attestations, so build like this:
+docker build --platform linux/amd64 --provenance=false --sbom=false -t <account>.dkr.ecr.ap-southeast-2.amazonaws.com/llm-gateway:v1 .
+docker push <account>.dkr.ecr.ap-southeast-2.amazonaws.com/llm-gateway:v1
+aws lambda create-function --function-name llm-gateway --package-type Image \
+  --code ImageUri=<image-uri> --role <role-arn> --memory-size 2048 --timeout 60 \
+  --environment file://lambda-env.json      # GROQ_API_KEY, LOG_BACKEND=dynamodb, DDB_TABLE, GATEWAY_API_KEY
+```
+
+Gotchas handled: read-only filesystem (`HOME=/tmp`), no network fetch of the model cost map at startup (`LITELLM_LOCAL_MODEL_COST_MAP=True`), `AWS_REGION` is reserved by Lambda, and a public Function URL needs both `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` permissions on newer accounts.
+
+This is a one-off hand deployment, not a production setup: no infrastructure-as-code, no CI, no alarms, and the public URL is protected only by a shared API key.
+
 ## Run locally
 
 ```bash
@@ -72,7 +123,7 @@ curl -s localhost:8080/chat -H 'Content-Type: application/json' \
 python -m streamlit run dashboard.py                   # dashboard
 ```
 
-Per-request `threshold` overrides the default; a value above 1 forces the strong model.
+Per-request `threshold` overrides the default; a value above 1 forces the strong model. If `GATEWAY_API_KEY` is set (as on Lambda), add `-H 'x-api-key: <key>'` to requests.
 
 Docker: `docker build -t llm-gateway . && docker run --rm -p 8080:8080 --env-file .env llm-gateway`
 
@@ -93,6 +144,8 @@ The raw results are in `results/`, so `analyze.py` reproduces the table without 
 - **The "obvious" design lost money.** My first benchmark used the strongest-looking judge (Qwen) on every request and cost 2.4x more than always-strong. Fixing it meant changing the verifier, not tuning thresholds.
 - **Judge scores were nearly binary,** so thresholds from 0.5 to 0.9 gave identical results.
 - **Rate limits skewed latency and halted runs.** Retry sleeps inflated latency numbers (fixed by timing only the successful attempt), and free-tier daily token caps stopped the benchmark mid-run, so it was split into resumable passes.
+- **A confusing AWS "explicit deny in a service control policy" error was a region guardrail.** AWS assigns each new account one region (Sydney for an Indian address) and denies regional services elsewhere. I mapped it with read-only probes across services and regions, confirmed it in AWS's docs, and redeployed in the right region at no cost. I had wrongly assumed the nearest region.
+- **The first Lambda cold start hit the 10 s init limit** and took 28.4 s end to end; later cold starts were about 6.5 s.
 
 ## Limitations
 
@@ -101,6 +154,7 @@ The raw results are in `results/`, so `analyze.py` reproduces the table without 
 - The price gap between models is small (the strong model costs about 2x per token, 3.4x per query because it reasons longer), which caps the savings. A larger gap would save much more.
 - Self-confidence is a weak signal (the model is overconfident); it wins because it is free, not because it is accurate.
 - A missing `CONFIDENCE:` line scores 0 and escalates (safe, but costs money): 11 of 200 benchmark answers had none.
+- Lambda cold starts are slow (about 6 to 28 s measured on two samples) and unmitigated; the deployment is manual with a shared API key and no alarms.
 - Multiple-choice answers are easy to verify; open-ended generation would need a different verifier.
 
 ## Layout
@@ -111,4 +165,6 @@ benchmark/   run_benchmark.py, run_judges.py, analyze.py
 results/     raw benchmark outputs, summary.csv, cost_vs_accuracy.png
 dashboard.py Streamlit dashboard
 config.yaml  models, prices, verifier mode, thresholds
+Dockerfile   container image (runs locally or on Lambda via Web Adapter)
+scripts/     demo traffic generator
 ```
