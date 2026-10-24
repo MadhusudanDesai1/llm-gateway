@@ -7,3 +7,5 @@ __pycache__/
 *.pyc
 # logs (can contain account identifiers)
 results/*.log
+.gateway_key
+lambda-env.json
